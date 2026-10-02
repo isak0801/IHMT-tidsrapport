@@ -232,6 +232,23 @@ tr.on td{background:var(--accent-soft)}
   <section class="panel" id="notisPanel" hidden>
     <div class="period"><h2>Notiser<span class="badge" id="badge" hidden></span></h2><button type="button" id="markRead" hidden>Markera som lästa</button></div>
     <div id="notiser" style="margin-top:8px"></div>
+    <details id="pushBox" style="margin-top:14px">
+      <summary>Push-notiser till telefonen (ntfy)</summary>
+      <div id="pushNone">
+        <p class="sub" style="font-size:.9rem;margin:0 0 10px">Skapa en egen notiskanal. Sedan får du en notis i appen ntfy varje gång någon avslutar sitt pass.</p>
+        <button class="primary" type="button" id="pushCreate">Skapa notiskanal</button>
+      </div>
+      <div id="pushSet" hidden>
+        <ol class="sub" style="font-size:.9rem;padding-left:20px;margin:0 0 12px;display:grid;gap:6px">
+          <li>Installera appen <b>ntfy</b> från App Store eller Google Play (gratis).</li>
+          <li>Tryck på <b>+</b> i ntfy och skriv in kanalnamnet nedan. Låt servern vara ntfy.sh.</li>
+          <li>Tryck på <b>Skicka testnotis</b> för att se att det fungerar.</li>
+        </ol>
+        <div class="btns"><code id="pushTopic" style="font-family:var(--font-num);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px 10px;user-select:all;overflow-wrap:anywhere"></code>
+          <button type="button" id="pushCopy">Kopiera</button><button type="button" id="pushTest">Skicka testnotis</button></div>
+        <p class="sub" style="font-size:.8rem;margin:10px 0 0">Håll kanalnamnet för dig själv. Den som känner till det kan läsa notiserna (namn och timmar, inga löner).</p>
+      </div>
+    </details>
   </section>
 
   <section class="panel" id="periodPanel" hidden>
@@ -376,6 +393,44 @@ $("startBtn").onclick=async()=>{
   }catch(e){err("clockErr","Kunde inte starta passet. Kontrollera anslutningen och försök igen.")}
   finally{$("startBtn").disabled=false}
 };
+/* ---------- push via ntfy ---------- */
+let pushTopic=null;
+async function sendPush(msg){
+  // Simple request (no custom headers) so the browser needs no preflight; ntfy reads the JSON body.
+  const r=await fetch("https://ntfy.sh/",{method:"POST",body:JSON.stringify(msg)});
+  if(!r.ok)throw new Error("ntfy "+r.status);
+}
+function queuePush(msg){
+  let q=[];try{q=JSON.parse(store.get("ihmt-push")||"[]")}catch(e){}
+  q.push(msg);store.set("ihmt-push",JSON.stringify(q.slice(-20)));flushPush();
+}
+async function flushPush(){
+  let q=[];try{q=JSON.parse(store.get("ihmt-push")||"[]")}catch(e){}
+  if(!q.length||!navigator.onLine)return;
+  const left=[];
+  for(const m of q){try{await sendPush(m)}catch(e){left.push(m)}}
+  store.set("ihmt-push",JSON.stringify(left));
+}
+window.addEventListener("online",flushPush);
+function notifyEnded(p){
+  if(isOwner||!pushTopic)return;
+  const s=new Date(p.start),e=new Date(p.slut);
+  queuePush({topic:pushTopic,
+    title:`${myName} har avslutat sitt pass: ${hm(p.minuter)}`,
+    message:`${dayLabel(s)} ${hhmm(s)}–${hhmm(e)}${p.efterhand?" (inlagt i efterhand)":""}${p.typ?" · "+p.typ:""}${p.omrade?" · "+p.omrade:""}\n${p.kommentar||""}`,
+    tags:p.skada?["warning"]:["snowflake"],priority:p.skada?5:3,click:location.origin+location.pathname});
+}
+$("pushCreate").onclick=async()=>{
+  const rnd=Array.from(crypto.getRandomValues(new Uint8Array(18)),b=>"abcdefghijkmnpqrstuvwxyz23456789"[b%32]).join("");
+  try{await db.doc("config/notis").set({topic:"ihmt-"+rnd});toast("Notiskanal skapad")}catch(e){toast("Kunde inte skapa kanalen. Kontrollera databasreglerna.")}
+};
+$("pushCopy").onclick=async()=>{try{await navigator.clipboard.writeText(pushTopic);toast("Kopierat")}catch(e){toast("Markera texten och kopiera den")}};
+$("pushTest").onclick=async()=>{
+  try{await sendPush({topic:pushTopic,title:"Testnotis från IHMT Tidrapport",message:"Det fungerar! Här kommer en notis när någon avslutar sitt pass.",tags:["white_check_mark"]});toast("Testnotis skickad")}
+  catch(e){toast("Kunde inte skicka. Kontrollera internet.")}
+};
+function renderPush(){show("pushNone",!pushTopic);show("pushSet",!!pushTopic);$("pushTopic").textContent=pushTopic||""}
+
 $("stopBtn").onclick=async()=>{
   const a=myActive();if(!a)return;
   const now=new Date(),rast=Math.max(0,Math.round(+$("endRast").value||0));
@@ -385,7 +440,9 @@ $("stopBtn").onclick=async()=>{
   $("stopBtn").disabled=true;err("clockErr");
   try{
     const min=minutesBetween(a.start,now,rast);
-    await passCol(uid).doc(a.id).update({status:"klar",slut:now.toISOString(),rastMin:rast,minuter:min,avslutad:now.toISOString(),kommentar,skada});
+    const upd={status:"klar",slut:now.toISOString(),rastMin:rast,minuter:min,avslutad:now.toISOString(),kommentar,skada};
+    await passCol(uid).doc(a.id).update(upd);
+    notifyEnded({...a,...upd});
     $("endRast").value=0;$("endKommentar").value="";$("endSkada").checked=false;toast(`Passet avslutat: ${hm(min)}`);
   }catch(e){err("clockErr","Kunde inte avsluta passet. Försök igen.")}
   finally{$("stopBtn").disabled=false}
@@ -417,7 +474,7 @@ $("mForm").addEventListener("submit",async ev=>{
     typ:$("mTyp").value.trim(),omrade:$("mOmrade").value.trim(),kommentar:$("mKommentar").value.trim(),skada:$("mSkada").checked,
     avslutad:editing&&editing.avslutad?editing.avslutad:new Date().toISOString(),efterhand:editing?!!editing.efterhand:true};
   try{
-    if(editing)await passCol(owner).doc(editing.id).set(data);else await passCol(owner).add(data);
+    if(editing)await passCol(owner).doc(editing.id).set(data);else{await passCol(owner).add(data);notifyEnded(data)}
     toast(editing?"Passet uppdaterat":`Sparat: ${hm(c.min)}`);mReset();$("manual").open=false;
   }catch(e){err("mErr","Kunde inte spara. Kontrollera anslutningen och försök igen.")}
   finally{$("mSave").disabled=false}
@@ -649,6 +706,7 @@ onAuthStateChanged(auth,u=>{
     render();
   },e=>{console.error(e);$("status").textContent="Kunde inte läsa data. Kontakta Isak."});
   watchPasses(uid);
+  db.doc("config/notis").onSnapshot(s=>{const d=s.exists?s.data():null;pushTopic=(d&&d.topic)||null;if(isOwner)renderPush();flushPush()},e=>console.error(e));
 
   if(isOwner){
     db.collection("tid").onSnapshot(snap=>{snap.docs.forEach(d=>{employees[d.id]=d.data();watchPasses(d.id)});render()},e=>console.error(e));
