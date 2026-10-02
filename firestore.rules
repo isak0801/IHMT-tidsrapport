@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Byt till samma e-post som OWNER_EMAIL i config.js
+    function isOwner() {
+      return request.auth != null && request.auth.token.email == 'ihallstrom08@gmail.com';
+    }
+    function isSelf(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Varje anställd: sitt namn och sina egna pass. Ägaren ser och ändrar allt.
+    match /tid/{uid} {
+      allow read, write: if isSelf(uid) || isOwner();
+      match /pass/{passId} {
+        allow read, write: if isSelf(uid) || isOwner();
+      }
+    }
+
+    // Priser, löner och notis-inställningar: bara ägaren.
+    match /data/users/{uid}/{doc} {
+      allow read, write: if isOwner() && isSelf(uid);
+    }
+  }
+}
